@@ -1,7 +1,9 @@
 package chanfan
 
 import (
+	"errors"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -118,4 +120,39 @@ func ProcessAndMerge[T any, K any](
 	bufSize ...int,
 ) <-chan *Result[K] {
 	return Merge(ProcessMany(inputs, process, bufSize...))
+}
+
+func CollectErrors[T any](in <-chan *Result[T]) error {
+	errorMessages := []string{}
+
+	for r := range in {
+		if r.Error != nil {
+			errorMessages = append(errorMessages, r.Error.Error())
+		}
+	}
+
+	return errors.New(strings.Join(errorMessages, "\n"))
+}
+
+func Collect[T any](in <-chan *Result[T], appendOnErr bool) ([]T, error) {
+	out := []T{}
+	errorMessages := []string{}
+
+	for r := range in {
+		if r.Error != nil {
+			errorMessages = append(errorMessages, r.Error.Error())
+			if !appendOnErr {
+				continue
+			}
+		}
+
+		out = append(out, r.Value)
+	}
+
+	var err error
+	if len(errorMessages) > 0 {
+		err = errors.New(strings.Join(errorMessages, "\n"))
+	}
+
+	return out, err
 }
