@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 func zeroOrFirst(bufSize ...int) int {
@@ -155,4 +156,84 @@ func Collect[T any](in <-chan *Result[T], appendOnErr bool) ([]T, error) {
 	}
 
 	return out, err
+}
+
+// IO acts as a single transceive unit.
+type IO[I any, O any] struct {
+	in  I
+	out chan<- *Result[O]
+}
+
+func NewIO[I any, O any](in I, out chan<- *Result[O]) *IO[I, O] {
+	return &IO[I, O]{
+		in:  in,
+		out: out,
+	}
+}
+
+const DefaultKeepAliveDuration = 60 * time.Second
+
+type Transceiver[I any, O any] struct {
+	KeepAliveDuration time.Duration
+	KeepAlive         func() error
+	Terminate         func() error
+
+	in <-chan *IO[I, O]
+}
+
+func NewTransceiver[I any, O any](in <-chan *IO[I, O]) *Transceiver[I, O] {
+	return &Transceiver[I, O]{in: in}
+}
+
+func (t *Transceiver[I, O]) Go(transceive func(I) (O, error)) <-chan error {
+	errs := make(chan error)
+	alive := make(chan struct{})
+	term := make(chan struct{})
+
+	if t.KeepAliveDuration == 0 {
+		t.KeepAliveDuration = DefaultKeepAliveDuration
+	}
+
+	go func() {
+	outer:
+		for {
+			select {
+			case <-time.After(t.KeepAliveDuration):
+				if t.KeepAlive != nil {
+					if err := t.KeepAlive(); err != nil {
+						errs <- err
+					}
+				}
+			case <-alive:
+				continue
+			case <-term:
+				break outer
+			}
+		}
+
+		if t.Terminate != nil {
+			if err := t.Terminate(); err != nil {
+				errs <- err
+			}
+		}
+
+		close(errs)
+	}()
+
+	go func() {
+		for iou := range t.in {
+			r := &Result[O]{}
+			r.Value, r.Error = transceive(iou.in)
+			alive <- struct{}{}
+			iou.out <- r
+			close(iou.out)
+		}
+
+		term <- struct{}{}
+
+		close(alive)
+		close(term)
+	}()
+
+	return errs
 }
